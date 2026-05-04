@@ -163,8 +163,8 @@ async fn handle_message(
         None => String::new(),
     };
 
-    let image_urls = if config.image_recognition {
-        extract_image_urls(&event.message)
+let image_urls = if config.image_recognition {
+        extract_image_urls(bot, &event.message, &llm.http()).await
     } else {
         Vec::new()
     };

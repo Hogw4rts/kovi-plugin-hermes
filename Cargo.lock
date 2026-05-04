@@ -873,6 +873,7 @@ dependencies = [
 name = "kovi-plugin-hermes"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures-util",
  "kovi",
  "regex",

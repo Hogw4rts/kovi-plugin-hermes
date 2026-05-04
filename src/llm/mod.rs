@@ -19,6 +19,10 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     pub fn new(
         config: Arc<HermesConfig>,
         store: Arc<SessionStore>,

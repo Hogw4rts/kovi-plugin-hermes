@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
+use base64::Engine;
 
 static THINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\U0001f9e0[\s\S]*?\U0001f9e0").expect("invalid think regex"));
@@ -111,20 +112,119 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
-pub fn extract_image_urls(message: &kovi::Message) -> Vec<String> {
-    let mut urls = Vec::with_capacity(2);
-    for seg in message.get("image") {
-        let url = seg
+pub async fn extract_image_urls(
+    bot: &kovi::RuntimeBot,
+    message: &kovi::Message,
+    http: &reqwest::Client,
+) -> Vec<String> {
+    let segments = message.get("image");
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::with_capacity(segments.len());
+
+    for seg in &segments {
+        let raw_url = seg
             .data
             .get("url")
-            .or_else(|| seg.data.get("file"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")));
-        if let Some(url) = url {
-            urls.push(url.to_string());
+
+        let raw_url = match raw_url {
+            Some(u) => Some(u.to_string()),
+            None => {
+                let file_val = seg.data.get("file").and_then(|v| v.as_str());
+                match file_val {
+                    Some(f) if f.starts_with("http://") || f.starts_with("https://") => {
+                        Some(f.to_string())
+                    }
+                    Some(f) if !f.is_empty() => {
+                        match bot.get_image(f).await {
+                            Ok(resp) => resp
+                                .data
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string()),
+                            Err(_) => {
+                                kovi::log::warn!("hermes: get_image API failed for file={f}");
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        };
+
+        let Some(url) = raw_url else {
+            kovi::log::warn!(
+                "hermes: image segment has no resolvable URL: {:?}",
+                seg.data
+            );
+            continue;
+        };
+
+        match download_as_base64(http, &url).await {
+            Ok(data_uri) => {
+                kovi::log::info!("hermes: image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
+                results.push(data_uri);
+            }
+            Err(e) => {
+                kovi::log::warn!("hermes: failed to download image {}: {e}", truncate_url(&url, 80));
+            }
         }
     }
-    urls
+
+    results
+}
+
+fn truncate_url(url: &str, max_len: usize) -> String {
+    if url.len() <= max_len {
+        url.to_string()
+    } else {
+        format!("{}...", &url[..max_len])
+    }
+}
+
+async fn download_as_base64(http: &reqwest::Client, url: &str) -> Result<String, String> {
+    let resp = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/png")
+        .to_string();
+
+    let mime = if content_type.starts_with("image/") {
+        content_type.clone()
+    } else {
+        "image/png".to_string()
+    };
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read body failed: {e}"))?;
+
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err(format!("image too large: {} bytes", bytes.len()));
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 pub fn build_context_label(is_group: bool, group_id: i64, user_id: i64, sender_name: &str, is_admin: bool) -> String {
