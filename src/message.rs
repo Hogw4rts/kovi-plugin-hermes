@@ -2,6 +2,8 @@ use regex::Regex;
 use std::sync::LazyLock;
 use base64::Engine;
 
+use crate::config::ImageMode;
+
 static THINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\U0001f9e0[\s\S]*?\U0001f9e0").expect("invalid think regex"));
 static ASSISTANT_PREFIX_RE: LazyLock<Regex> =
@@ -116,6 +118,7 @@ pub async fn extract_image_urls(
     bot: &kovi::RuntimeBot,
     message: &kovi::Message,
     http: &reqwest::Client,
+    mode: ImageMode,
 ) -> Vec<String> {
     let segments = message.get("image");
     if segments.is_empty() {
@@ -166,14 +169,20 @@ pub async fn extract_image_urls(
             continue;
         };
 
-        match download_as_base64(http, &url).await {
-            Ok(data_uri) => {
-                kovi::log::info!("hermes: image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
-                results.push(data_uri);
+        match mode {
+            ImageMode::Url => {
+                kovi::log::info!("hermes: image URL passthrough ({})", truncate_url(&url, 80));
+                results.push(url);
             }
-            Err(e) => {
-                kovi::log::warn!("hermes: failed to download image {}: {e}", truncate_url(&url, 80));
-            }
+            ImageMode::Base64 => match download_as_base64(http, &url).await {
+                Ok(data_uri) => {
+                    kovi::log::info!("hermes: image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
+                    results.push(data_uri);
+                }
+                Err(e) => {
+                    kovi::log::warn!("hermes: failed to download image {}: {e}", truncate_url(&url, 80));
+                }
+            },
         }
     }
 

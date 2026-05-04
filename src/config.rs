@@ -54,6 +54,19 @@ pub struct HermesConfig {
     pub stream_response: bool,
     #[serde(default = "default_true")]
     pub image_recognition: bool,
+    #[serde(default = "default_image_mode")]
+    pub image_mode: ImageMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageMode {
+    Url,
+    Base64,
+}
+
+fn default_image_mode() -> ImageMode {
+    ImageMode::Url
 }
 
 fn default_true() -> bool {
@@ -116,6 +129,7 @@ impl Default for HermesConfig {
             api_rate_limit_rpm: 60,
             stream_response: false,
             image_recognition: true,
+            image_mode: default_image_mode(),
         }
     }
 }

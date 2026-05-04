@@ -79,6 +79,21 @@ impl LlmClient {
             }
         }
         let user_content = MessageContent::from_text_and_images(user_message, image_urls);
+        if !image_urls.is_empty() {
+            match &user_content {
+                MessageContent::Multimodal(parts) => {
+                    kovi::log::info!(
+                        "hermes: sending multimodal message with {} parts ({} image URLs, first URL prefix: {})",
+                        parts.len(),
+                        image_urls.len(),
+                        image_urls.first().map(|u| u.chars().take(50).collect::<String>()).unwrap_or_default()
+                    );
+                }
+                MessageContent::Text(_) => {
+                    kovi::log::warn!("hermes: image_urls provided but content is Text-only!");
+                }
+            }
+        }
         messages.push(ChatMessage {
             role: Role::User,
             content: user_content,
