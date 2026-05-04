@@ -22,7 +22,7 @@ use kovi::MsgEvent;
 use kovi::PluginBuilder as plugin;
 use llm::LlmClient;
 use llm::StreamEvent;
-use message::{build_context_label, build_user_prompt, clean_outbound_text, extract_image_urls};
+use message::{build_context_label, build_user_prompt, clean_outbound_text, extract_image_urls, extract_reply_image_urls};
 use queue::SessionQueue;
 use ratelimit::RateLimiter;
 use reply::{is_reply_to_bot_message, reply_text};
@@ -163,11 +163,19 @@ async fn handle_message(
         None => String::new(),
     };
 
-let image_urls = if config.image_recognition {
+let mut image_urls = if config.image_recognition {
         extract_image_urls(bot, &event.message, &llm.http(), config.image_mode).await
     } else {
         Vec::new()
     };
+
+    if image_urls.is_empty() && config.image_recognition && event.message.contains("reply") {
+        let reply_urls = extract_reply_image_urls(bot, &event.message, &llm.http(), config.image_mode).await;
+        if !reply_urls.is_empty() {
+            kovi::log::info!("hermes: extracted {} image(s) from replied message", reply_urls.len());
+            image_urls = reply_urls;
+        }
+    }
 
     if text.is_empty() && image_urls.is_empty() {
         return;

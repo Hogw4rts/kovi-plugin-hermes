@@ -189,6 +189,102 @@ pub async fn extract_image_urls(
     results
 }
 
+pub async fn extract_reply_image_urls(
+    bot: &kovi::RuntimeBot,
+    message: &kovi::Message,
+    http: &reqwest::Client,
+    mode: ImageMode,
+) -> Vec<String> {
+    let reply_segments = message.get("reply");
+    if reply_segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+
+    for seg in &reply_segments {
+        let Some(id_str) = seg.data.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(msg_id) = id_str.parse::<i32>() else {
+            continue;
+        };
+
+        let Ok(resp) = bot.get_msg(msg_id).await else {
+            kovi::log::warn!("hermes: get_msg failed for reply id={msg_id}");
+            continue;
+        };
+
+        let Some(msg_array) = resp.data.get("message").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        for item in msg_array {
+            let Some(type_) = item.get("type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if type_ != "image" {
+                continue;
+            }
+
+            let Some(data) = item.get("data") else {
+                continue;
+            };
+
+            let raw_url = data
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")));
+
+            let raw_url = match raw_url {
+                Some(u) => Some(u.to_string()),
+                None => {
+                    let file_val = data.get("file").and_then(|v| v.as_str());
+                    match file_val {
+                        Some(f) if f.starts_with("http://") || f.starts_with("https://") => {
+                            Some(f.to_string())
+                        }
+                        Some(f) if !f.is_empty() => {
+                            match bot.get_image(f).await {
+                                Ok(img_resp) => img_resp
+                                    .data
+                                    .get("url")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string()),
+                                Err(_) => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            };
+
+            let Some(url) = raw_url else {
+                continue;
+            };
+
+            match mode {
+                ImageMode::Url => {
+                    kovi::log::info!("hermes: reply image URL passthrough ({})", truncate_url(&url, 80));
+                    results.push(url);
+                }
+                ImageMode::Base64 => match download_as_base64(http, &url).await {
+                    Ok(data_uri) => {
+                        kovi::log::info!("hermes: reply image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
+                        results.push(data_uri);
+                    }
+                    Err(e) => {
+                        kovi::log::warn!("hermes: failed to download reply image {}: {e}", truncate_url(&url, 80));
+                    }
+                },
+            }
+        }
+    }
+
+    results
+}
+
 fn truncate_url(url: &str, max_len: usize) -> String {
     if url.len() <= max_len {
         url.to_string()
