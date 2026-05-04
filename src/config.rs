@@ -139,8 +139,7 @@ impl HermesConfig {
             format!("{}\n{}", base, self.system_prompt)
         }
     }
-
-    }
+}
 
 pub fn load_config(data_dir: &Path) -> HermesConfig {
     let path = data_dir.join("hermes.json");

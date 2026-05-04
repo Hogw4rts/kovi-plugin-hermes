@@ -4,6 +4,7 @@ use crate::session::SessionStore;
 use kovi::MsgEvent;
 
 #[derive(Debug)]
+#[must_use]
 pub enum CommandResult {
     Handled,
     NotACommand,

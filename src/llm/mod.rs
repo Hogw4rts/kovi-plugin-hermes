@@ -24,18 +24,18 @@ impl LlmClient {
         store: Arc<SessionStore>,
         system_prompt: Arc<String>,
         rate_limiter: RateLimiter,
-    ) -> Self {
+    ) -> Result<Self, LlmError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
             .build()
-            .expect("failed to build reqwest client — TLS backend may be missing");
-        Self {
+            .map_err(|e| LlmError::ClientBuild(e.to_string()))?;
+        Ok(Self {
             http,
             config,
             store,
             system_prompt,
             rate_limiter,
-        }
+        })
     }
 
     async fn resolve_model(&self, model_override: Option<&str>) -> String {
@@ -54,9 +54,10 @@ impl LlmClient {
         &self,
         session_id: &str,
         user_message: &str,
-        image_urls: &[String],
+        image_urls: &[&str],
     ) -> Vec<ChatMessage> {
-        let mut messages = Vec::new();
+        let estimated = 1 + if self.config.local_history_enabled { 8 } else { 0 } + 1;
+        let mut messages = Vec::with_capacity(estimated);
         let system_prompt = self.system_prompt.as_str();
         if !system_prompt.is_empty() {
             messages.push(ChatMessage {
@@ -81,12 +82,33 @@ impl LlmClient {
         messages
     }
 
+    async fn persist_turn(&self, session_id: &str, user_message: &str, assistant_reply: &str) {
+        if self.config.local_history_enabled {
+            self.store
+                .append_conversation(
+                    session_id,
+                    &[
+                        ConversationMessage {
+                            role: Role::User,
+                            content: user_message.to_string(),
+                        },
+                        ConversationMessage {
+                            role: Role::Assistant,
+                            content: assistant_reply.to_string(),
+                        },
+                    ],
+                    self.config.local_history_max_messages,
+                )
+                .await;
+        }
+    }
+
     pub async fn complete(
         &self,
         session_id: &str,
         user_message: &str,
         model_override: Option<&str>,
-        image_urls: &[String],
+        image_urls: &[&str],
     ) -> Result<String, LlmError> {
         let model = self.resolve_model(model_override).await;
         let messages = self.build_messages(session_id, user_message, image_urls).await;
@@ -113,24 +135,7 @@ impl LlmClient {
             let result = self.send_request(&url, &body, session_id).await;
             match result {
                 Ok(reply) => {
-                    if self.config.local_history_enabled {
-                        self.store
-                            .append_conversation(
-                                session_id,
-                                &[
-                                    ConversationMessage {
-                                        role: Role::User,
-                                        content: user_message.to_string(),
-                                    },
-                                    ConversationMessage {
-                                        role: Role::Assistant,
-                                        content: reply.clone(),
-                                    },
-                                ],
-                                self.config.local_history_max_messages,
-                            )
-                            .await;
-                    }
+                    self.persist_turn(session_id, user_message, &reply).await;
                     return Ok(reply);
                 }
                 Err(e) => {
@@ -147,7 +152,7 @@ impl LlmClient {
         session_id: &str,
         user_message: &str,
         model_override: Option<&str>,
-        image_urls: &[String],
+        image_urls: &[&str],
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, LlmError> {
         let model = self.resolve_model(model_override).await;
         let messages = self.build_messages(session_id, user_message, image_urls).await;
@@ -198,7 +203,7 @@ impl LlmClient {
         let store = self.store.clone();
         let config = self.config.clone();
 
-        kovi::spawn(async move {
+kovi::spawn(async move {
             let mut full_reply = String::new();
             let mut stream = resp.bytes_stream();
 
@@ -224,44 +229,36 @@ impl LlmClient {
                         Err(_) => continue,
                     };
 
-                    if !line.starts_with("data: ") {
-                        continue;
-                    }
-
-                    let data = &line[6..];
-                    if data == "[DONE]" {
-                        if config.local_history_enabled && !full_reply.is_empty() {
-                            store
-                                .append_conversation(
-                                    &session_id_owned,
-                                    &[
-                                        ConversationMessage {
-                                            role: Role::User,
-                                            content: user_msg,
-                                        },
-                                        ConversationMessage {
-                                            role: Role::Assistant,
-                                            content: full_reply.clone(),
-                                        },
-                                    ],
-                                    config.local_history_max_messages,
-                                )
-                                .await;
+                    match parse_sse_line(line) {
+                        Some(SseFrame::Done) => {
+                            if config.local_history_enabled && !full_reply.is_empty() {
+                                store
+                                    .append_conversation(
+                                        &session_id_owned,
+                                        &[
+                                            ConversationMessage {
+                                                role: Role::User,
+                                                content: user_msg.clone(),
+                                            },
+                                            ConversationMessage {
+                                                role: Role::Assistant,
+                                                content: full_reply,
+                                            },
+                                        ],
+                                        config.local_history_max_messages,
+                                    )
+                                    .await;
+                            }
+                            let _ = tx.send(StreamEvent::Done).await;
+                            return;
                         }
-                        let _ = tx.send(StreamEvent::Done).await;
-                        return;
-                    }
-
-                    if let Ok(chunk_resp) = serde_json::from_str::<ChatChunkResponse>(data)
-                        && let Some(delta) = chunk_resp
-                            .choices
-                            .first()
-                            .and_then(|c| c.delta.as_ref())
-                            .and_then(|d| d.content.as_ref())
-                            && !delta.is_empty()
-                    {
-                        full_reply.push_str(delta);
-                        let _ = tx.send(StreamEvent::Delta(delta.clone())).await;
+                        Some(SseFrame::Data(data)) => {
+                            if let Some(delta) = extract_delta(&data) {
+                                full_reply.push_str(&delta);
+                                let _ = tx.send(StreamEvent::Delta(delta)).await;
+                            }
+                        }
+                        None => {}
                     }
                 }
 
@@ -396,4 +393,87 @@ pub enum StreamEvent {
     Delta(String),
     Done,
     Error(String),
+}
+
+enum SseFrame {
+    Data(String),
+    Done,
+}
+
+fn parse_sse_line(line: &str) -> Option<SseFrame> {
+    let data = line.strip_prefix("data: ")?;
+    if data == "[DONE]" {
+        Some(SseFrame::Done)
+    } else {
+        Some(SseFrame::Data(data.to_string()))
+    }
+}
+
+fn extract_delta(data: &str) -> Option<String> {
+    let chunk_resp = serde_json::from_str::<ChatChunkResponse>(data).ok()?;
+    let delta = chunk_resp
+        .choices
+        .first()?
+        .delta
+        .as_ref()?
+        .content
+        .as_ref()?;
+    if delta.is_empty() {
+        None
+    } else {
+        Some(delta.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_sse_line_data() {
+        let frame = parse_sse_line("data: {\"choices\":[]}");
+        assert!(matches!(frame, Some(SseFrame::Data(s)) if s == "{\"choices\":[]}"));
+    }
+
+    #[test]
+    fn test_parse_sse_line_done() {
+        let frame = parse_sse_line("data: [DONE]");
+        assert!(matches!(frame, Some(SseFrame::Done)));
+    }
+
+    #[test]
+    fn test_parse_sse_line_ignores_non_data() {
+        assert!(parse_sse_line(": comment").is_none());
+        assert!(parse_sse_line("event: ping").is_none());
+        assert!(parse_sse_line("").is_none());
+        assert!(parse_sse_line(" ").is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_line_ignores_data_without_space() {
+        assert!(parse_sse_line("data:without-space").is_none());
+    }
+
+    #[test]
+    fn test_extract_delta_with_content() {
+        let data = r#"{"choices":[{"delta":{"content":"hello"}}]}"#;
+        assert_eq!(extract_delta(data), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_extract_delta_empty_content() {
+        let data = r#"{"choices":[{"delta":{"content":""}}]}"#;
+        assert_eq!(extract_delta(data), None);
+    }
+
+    #[test]
+    fn test_extract_delta_no_content() {
+        let data = r#"{"choices":[{"delta":{}}]}"#;
+        assert_eq!(extract_delta(data), None);
+    }
+
+    #[test]
+    fn test_extract_delta_invalid_json() {
+        assert_eq!(extract_delta("not json"), None);
+    }
 }

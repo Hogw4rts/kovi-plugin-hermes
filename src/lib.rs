@@ -26,7 +26,7 @@ use message::{build_context_label, build_user_prompt, clean_outbound_text, extra
 use queue::SessionQueue;
 use ratelimit::RateLimiter;
 use reply::{is_reply_to_bot_message, reply_text};
-use routing::{GroupId, MsgType, MessageRoute, UserId, build_base_session_key};
+use routing::{GroupId, MsgType, MessageRoute, UserInput, UserId, build_base_session_key};
 use session::SessionStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,12 +78,18 @@ async fn main() {
     } else {
         RateLimiter::unlimited()
     };
-    let llm = Arc::new(LlmClient::new(
+    let llm = match LlmClient::new(
         config.clone(),
         store.clone(),
         cached.system_prompt.clone(),
         rate_limiter,
-    ));
+    ) {
+        Ok(client) => Arc::new(client),
+        Err(e) => {
+            kovi::log::error!("hermes: failed to initialize LLM client: {e}");
+            return;
+        }
+    };
     let queue = Arc::new(SessionQueue::new());
     let notif_guard = Arc::new(NotificationGuard::new());
 
@@ -116,10 +122,10 @@ async fn handle_message(
     bot: &kovi::RuntimeBot,
     event: &MsgEvent,
     cached: &CachedConfig,
-    store: &SessionStore,
-    llm: &LlmClient,
-    queue: &SessionQueue,
-    notif_guard: &NotificationGuard,
+    store: &Arc<SessionStore>,
+    llm: &Arc<LlmClient>,
+    queue: &Arc<SessionQueue>,
+    notif_guard: &Arc<NotificationGuard>,
     self_id: i64,
     use_stream: bool,
 ) {
@@ -220,86 +226,86 @@ async fn handle_message(
         &route.sender_name,
         is_admin,
     );
-    let user_prompt = build_user_prompt(&text, &context_label);
+    let user_input = UserInput {
+        text: if text.is_empty() && !image_urls.is_empty() {
+            "[图片]".to_string()
+        } else {
+            text
+        },
+        image_urls,
+    };
+    let user_prompt = build_user_prompt(&user_input.text, &context_label);
 
-    handle_chat(bot, llm, store, config, queue, &route, &base_key, &session_id, &user_prompt, &image_urls, use_stream).await;
+    handle_chat(bot, llm, &cached.inner, queue, &route, &base_key, &session_id, &user_prompt, &user_input, use_stream).await;
+}
+
+struct ChatContext {
+    llm: LlmClient,
+    config: Arc<HermesConfig>,
+    bot: kovi::RuntimeBot,
+    route: MessageRoute,
+    session_id: String,
+    user_prompt: String,
+    user_input: UserInput,
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_chat(
     bot: &kovi::RuntimeBot,
-    llm: &LlmClient,
-    store: &SessionStore,
-    config: &HermesConfig,
-    queue: &SessionQueue,
+    llm: &Arc<LlmClient>,
+    config: &Arc<HermesConfig>,
+    queue: &Arc<SessionQueue>,
     route: &MessageRoute,
     base_key: &str,
     session_id: &str,
     user_prompt: &str,
-    image_urls: &[String],
+    user_input: &UserInput,
     use_stream: bool,
 ) {
     let debounce_ms = config.queue_debounce_ms;
-    let llm_clone = llm.clone();
-    let store_clone = store.clone();
-    let config_clone = config.clone();
-    let bot_clone = bot.clone();
-    let route_clone = route.clone();
-    let session_id_owned = session_id.to_string();
-    let user_prompt_owned = user_prompt.to_string();
-    let image_urls_owned = image_urls.to_vec();
+    let ctx = ChatContext {
+        llm: (**llm).clone(),
+        config: Arc::clone(config),
+        bot: bot.clone(),
+        route: route.clone(),
+        session_id: session_id.to_string(),
+        user_prompt: user_prompt.to_string(),
+        user_input: user_input.clone(),
+    };
 
     queue.enqueue(base_key, move || {
-        let llm = llm_clone;
-        let store = store_clone;
-        let config = config_clone;
-        let bot = bot_clone;
-        let route = route_clone;
-        let session_id = session_id_owned;
-        let user_prompt = user_prompt_owned;
-        let image_urls = image_urls_owned;
-
         async move {
             if debounce_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
             }
 
             if use_stream {
-                handle_stream_reply(&llm, &config, &bot, &route, &session_id, &user_prompt, &image_urls).await;
+                handle_stream_reply(&ctx).await;
             } else {
-                handle_normal_reply(&llm, &config, &bot, &route, &session_id, &user_prompt, &image_urls).await;
+                handle_normal_reply(&ctx).await;
             }
-
-            drop(store);
         }
     }).await;
 }
 
-async fn handle_normal_reply(
-    llm: &LlmClient,
-    config: &HermesConfig,
-    bot: &kovi::RuntimeBot,
-    route: &MessageRoute,
-    session_id: &str,
-    user_prompt: &str,
-    image_urls: &[String],
-) {
-    match llm.complete(session_id, user_prompt, None, image_urls).await {
+async fn handle_normal_reply(ctx: &ChatContext) {
+    let image_refs = ctx.user_input.image_urls_as_str();
+    match ctx.llm.complete(&ctx.session_id, &ctx.user_prompt, None, &image_refs).await {
         Ok(reply) => {
-            let cleaned = clean_outbound_text(&reply, config.format_markdown);
+            let cleaned = clean_outbound_text(&reply, ctx.config.format_markdown);
             let outbound = if cleaned.is_empty() {
                 "\u{8fd9}\u{8f6e}\u{6ca1}\u{6709}\u{8fd4}\u{56de}\u{53ef}\u{53d1}\u{9001}\u{7684}\u{6587}\u{672c}\u{3002}".to_string()
             } else {
                 cleaned
             };
-            reply_text(bot, route, config, &outbound).await;
+            reply_text(&ctx.bot, &ctx.route, &ctx.config, &outbound).await;
         }
         Err(e) => {
-            kovi::log::warn!("hermes: message handling failed for {session_id}: {e}");
+            kovi::log::warn!("hermes: message handling failed for {}: {e}", ctx.session_id);
             reply_text(
-                bot,
-                route,
-                config,
+                &ctx.bot,
+                &ctx.route,
+                &ctx.config,
                 &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
             )
             .await;
@@ -307,23 +313,16 @@ async fn handle_normal_reply(
     }
 }
 
-async fn handle_stream_reply(
-    llm: &LlmClient,
-    config: &HermesConfig,
-    bot: &kovi::RuntimeBot,
-    route: &MessageRoute,
-    session_id: &str,
-    user_prompt: &str,
-    image_urls: &[String],
-) {
-    let mut rx = match llm.complete_stream(session_id, user_prompt, None, image_urls).await {
+async fn handle_stream_reply(ctx: &ChatContext) {
+    let image_refs = ctx.user_input.image_urls_as_str();
+    let mut rx = match ctx.llm.complete_stream(&ctx.session_id, &ctx.user_prompt, None, &image_refs).await {
         Ok(rx) => rx,
         Err(e) => {
-            kovi::log::warn!("hermes: stream request failed for {session_id}: {e}");
+            kovi::log::warn!("hermes: stream request failed for {}: {e}", ctx.session_id);
             reply_text(
-                bot,
-                route,
-                config,
+                &ctx.bot,
+                &ctx.route,
+                &ctx.config,
                 &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
             )
             .await;
@@ -338,13 +337,13 @@ async fn handle_stream_reply(
         match event {
             StreamEvent::Delta(delta) => {
                 buffer.push_str(&delta);
-                let should_flush = buffer.len() >= config.max_message_length
+                let should_flush = buffer.len() >= ctx.config.max_message_length
                     || buffer.ends_with("\n\n");
 
                 if should_flush {
-                    let cleaned = clean_outbound_text(&buffer, config.format_markdown);
+                    let cleaned = clean_outbound_text(&buffer, ctx.config.format_markdown);
                     if !cleaned.is_empty() {
-                        reply_text(bot, route, config, &cleaned).await;
+                        reply_text(&ctx.bot, &ctx.route, &ctx.config, &cleaned).await;
                         sent_any = true;
                     }
                     buffer.clear();
@@ -352,17 +351,17 @@ async fn handle_stream_reply(
             }
             StreamEvent::Done => {
                 if !buffer.is_empty() {
-                    let cleaned = clean_outbound_text(&buffer, config.format_markdown);
+                    let cleaned = clean_outbound_text(&buffer, ctx.config.format_markdown);
                     if !cleaned.is_empty() {
-                        reply_text(bot, route, config, &cleaned).await;
+                        reply_text(&ctx.bot, &ctx.route, &ctx.config, &cleaned).await;
                         sent_any = true;
                     }
                 }
                 if !sent_any {
                     reply_text(
-                        bot,
-                        route,
-                        config,
+                        &ctx.bot,
+                        &ctx.route,
+                        &ctx.config,
                         "\u{8fd9}\u{8f6e}\u{6ca1}\u{6709}\u{8fd4}\u{56de}\u{53ef}\u{53d1}\u{9001}\u{7684}\u{6587}\u{672c}\u{3002}",
                     )
                     .await;
@@ -370,19 +369,19 @@ async fn handle_stream_reply(
                 break;
             }
             StreamEvent::Error(e) => {
-                kovi::log::warn!("hermes: stream error for {session_id}: {e}");
+                kovi::log::warn!("hermes: stream error for {}: {e}", ctx.session_id);
                 if !buffer.is_empty() {
-                    let cleaned = clean_outbound_text(&buffer, config.format_markdown);
+                    let cleaned = clean_outbound_text(&buffer, ctx.config.format_markdown);
                     if !cleaned.is_empty() {
-                        reply_text(bot, route, config, &cleaned).await;
+                        reply_text(&ctx.bot, &ctx.route, &ctx.config, &cleaned).await;
                         sent_any = true;
                     }
                 }
                 if !sent_any {
                     reply_text(
-                        bot,
-                        route,
-                        config,
+                        &ctx.bot,
+                        &ctx.route,
+                        &ctx.config,
                         &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
                     )
                     .await;

@@ -1,4 +1,13 @@
 use crate::config::HermesConfig;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgType {
@@ -43,5 +52,17 @@ pub fn build_base_session_key(route: &MessageRoute, config: &HermesConfig) -> St
             }
         }
         MsgType::Private => format!("qq:user:{}", route.user_id),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserInput {
+    pub text: String,
+    pub image_urls: Vec<String>,
+}
+
+impl UserInput {
+    pub fn image_urls_as_str(&self) -> Vec<&str> {
+        self.image_urls.iter().map(String::as_str).collect()
     }
 }

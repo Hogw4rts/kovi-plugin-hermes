@@ -8,4 +8,6 @@ pub enum LlmError {
     Api { status: u16, message: String },
     #[error("empty response from model")]
     EmptyResponse,
+    #[error("failed to build http client: {0}")]
+    ClientBuild(String),
 }

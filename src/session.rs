@@ -1,4 +1,4 @@
-use crate::llm::types::Role;
+use crate::routing::Role;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ const SESSION_TTL_SECS: u64 = 86400;
 const FLUSH_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ConversationMessage {
     pub role: Role,
     pub content: String,

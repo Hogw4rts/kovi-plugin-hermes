@@ -112,11 +112,15 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
 }
 
 pub fn extract_image_urls(message: &kovi::Message) -> Vec<String> {
-    let mut urls = Vec::new();
+    let mut urls = Vec::with_capacity(2);
     for seg in message.get("image") {
-        if let Some(url) = seg.data.get("url").and_then(|v| v.as_str())
-            && !url.is_empty()
-        {
+        let url = seg
+            .data
+            .get("url")
+            .or_else(|| seg.data.get("file"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")));
+        if let Some(url) = url {
             urls.push(url.to_string());
         }
     }
