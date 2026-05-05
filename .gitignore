@@ -14,4 +14,4 @@ debug
 **/mutants.out*/
 
 # RustRover
-#.idea/
+#.idea/.DS_Store

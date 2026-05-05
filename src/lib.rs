@@ -7,6 +7,7 @@ mod config;
 mod guard;
 mod llm;
 mod message;
+mod onebot_api;
 mod queue;
 mod ratelimit;
 mod reply;
@@ -93,6 +94,21 @@ async fn main() {
     let queue = Arc::new(SessionQueue::new());
     let notif_guard = Arc::new(NotificationGuard::new());
 
+    if config.onebot_api_enabled && !config.onebot_api_key.is_empty() {
+        let ob_state = onebot_api::OnebotState {
+            bot: bot.clone(),
+            api_key: config.onebot_api_key.clone(),
+            admin_ids: bot.get_all_admin().unwrap_or_default(),
+        };
+        let ob_port = config.onebot_api_port;
+        tokio::spawn(async move {
+            if let Err(e) = onebot_api::start(ob_state, ob_port).await {
+                kovi::log::error!("hermes: OneBot API server error: {e}");
+            }
+        });
+        info!("hermes: OneBot API enabled on port {ob_port}");
+    }
+
     plugin::on_msg({
         let bot = bot.clone();
         let cached = cached.clone();
@@ -142,6 +158,13 @@ async fn handle_message(
     if user_id.0 == self_id {
         return;
     }
+
+    kovi::log::info!(
+        "hermes: received message_id={} from {} in {:?}",
+        event.message_id,
+        user_id.0,
+        event.group_id
+    );
 
     let is_admin = bot.get_all_admin()
         .is_ok_and(|admins| admins.contains(&user_id.0));

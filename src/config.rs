@@ -56,6 +56,12 @@ pub struct HermesConfig {
     pub image_recognition: bool,
     #[serde(default = "default_image_mode")]
     pub image_mode: ImageMode,
+    #[serde(default)]
+    pub onebot_api_enabled: bool,
+    #[serde(default = "default_onebot_api_port")]
+    pub onebot_api_port: u16,
+    #[serde(default)]
+    pub onebot_api_key: SecretString,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +106,10 @@ fn default_api_rate_limit_rpm() -> u64 {
     60
 }
 
+fn default_onebot_api_port() -> u16 {
+    5801
+}
+
 impl Default for HermesConfig {
     fn default() -> Self {
         Self {
@@ -130,6 +140,9 @@ impl Default for HermesConfig {
             stream_response: false,
             image_recognition: true,
             image_mode: default_image_mode(),
+            onebot_api_enabled: false,
+            onebot_api_port: default_onebot_api_port(),
+            onebot_api_key: SecretString::new(String::new()),
         }
     }
 }

@@ -4,6 +4,19 @@ use base64::Engine;
 
 use crate::config::ImageMode;
 
+static IMAGE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r##"https?://[^\s<>"']++\.(?:jpg|jpeg|png|gif|webp|bmp|svg)(?:\?[^\s<>"']*)?"##)
+        .expect("invalid image url regex")
+});
+static QQ_AVATAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://(?:q\d*\.qlogo\.cn|img\.qq\.com)/[^\s<>"']+"#)
+        .expect("invalid qq avatar url regex")
+});
+static QQ_CDN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://multimedia\.nt\.qq\.com\.cn/[^\s<>"']+"#)
+        .expect("invalid qq cdn url regex")
+});
+
 static THINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\U0001f9e0[\s\S]*?\U0001f9e0").expect("invalid think regex"));
 static ASSISTANT_PREFIX_RE: LazyLock<Regex> =
@@ -121,11 +134,7 @@ pub async fn extract_image_urls(
     mode: ImageMode,
 ) -> Vec<String> {
     let segments = message.get("image");
-    if segments.is_empty() {
-        return Vec::new();
-    }
-
-    let mut results = Vec::with_capacity(segments.len());
+    let mut results = Vec::with_capacity(segments.len().max(4));
 
     for seg in &segments {
         let raw_url = seg
@@ -169,18 +178,48 @@ pub async fn extract_image_urls(
             continue;
         };
 
+        let needs_base64 = url.contains("multimedia.nt.qq.com.cn");
         match mode {
-            ImageMode::Url => {
+            ImageMode::Url if !needs_base64 => {
                 kovi::log::info!("hermes: image URL passthrough ({})", truncate_url(&url, 80));
                 results.push(url);
             }
-            ImageMode::Base64 => match download_as_base64(http, &url).await {
+            _ => match download_as_base64(http, &url).await {
                 Ok(data_uri) => {
                     kovi::log::info!("hermes: image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
                     results.push(data_uri);
                 }
                 Err(e) => {
                     kovi::log::warn!("hermes: failed to download image {}: {e}", truncate_url(&url, 80));
+                }
+            },
+        }
+    }
+
+    let text_segments = message.get("text");
+    let text: &str = text_segments
+        .first()
+        .and_then(|seg| seg.data.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    let text_image_urls = extract_text_image_urls(text);
+    for url in text_image_urls {
+        if results.iter().any(|u| u == &url) {
+            continue;
+        }
+        let needs_base64 = url.contains("multimedia.nt.qq.com.cn");
+        match mode {
+            ImageMode::Url if !needs_base64 => {
+                kovi::log::info!("hermes: text image URL passthrough ({})", truncate_url(&url, 80));
+                results.push(url);
+            }
+            _ => match download_as_base64(http, &url).await {
+                Ok(data_uri) => {
+                    kovi::log::info!("hermes: text image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
+                    results.push(data_uri);
+                }
+                Err(e) => {
+                    kovi::log::warn!("hermes: failed to download text image {}: {e}", truncate_url(&url, 80));
                 }
             },
         }
@@ -264,12 +303,13 @@ pub async fn extract_reply_image_urls(
                 continue;
             };
 
+            let needs_base64 = url.contains("multimedia.nt.qq.com.cn");
             match mode {
-                ImageMode::Url => {
+                ImageMode::Url if !needs_base64 => {
                     kovi::log::info!("hermes: reply image URL passthrough ({})", truncate_url(&url, 80));
                     results.push(url);
                 }
-                ImageMode::Base64 => match download_as_base64(http, &url).await {
+                _ => match download_as_base64(http, &url).await {
                     Ok(data_uri) => {
                         kovi::log::info!("hermes: reply image downloaded as base64 ({} bytes from {})", data_uri.len(), truncate_url(&url, 80));
                         results.push(data_uri);
@@ -291,6 +331,22 @@ fn truncate_url(url: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &url[..max_len])
     }
+}
+
+fn extract_text_image_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for re in [&*IMAGE_URL_RE, &*QQ_AVATAR_RE, &*QQ_CDN_RE] {
+        for cap in re.captures_iter(text) {
+            let url = cap[0].to_string();
+            if seen.insert(url.clone()) {
+                urls.push(url);
+            }
+        }
+    }
+
+    urls
 }
 
 async fn download_as_base64(http: &reqwest::Client, url: &str) -> Result<String, String> {
