@@ -74,7 +74,6 @@ pub(crate) async fn handle_command(
             }
             CommandResult::Handled
         }
-        "transfer" => CommandResult::Handled,
         _ => CommandResult::NotACommand,
     }
 }
