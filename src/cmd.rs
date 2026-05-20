@@ -5,14 +5,14 @@ use kovi::MsgEvent;
 
 #[derive(Debug)]
 #[must_use]
-pub enum CommandResult {
+pub(crate) enum CommandResult {
     Handled,
     NotACommand,
     #[allow(dead_code)]
     Failed(String),
 }
 
-pub async fn handle_command(
+pub(crate) async fn handle_command(
     event: &MsgEvent,
     text: &str,
     config: &HermesConfig,
@@ -74,6 +74,7 @@ pub async fn handle_command(
             }
             CommandResult::Handled
         }
+        "transfer" => CommandResult::Handled,
         _ => CommandResult::NotACommand,
     }
 }

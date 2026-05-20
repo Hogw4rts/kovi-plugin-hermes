@@ -13,13 +13,13 @@ const FLUSH_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct ConversationMessage {
+pub(crate) struct ConversationMessage {
     pub role: Role,
     pub content: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SessionState {
+pub(crate) struct SessionState {
     #[serde(default)]
     pub session_versions: HashMap<String, u64>,
     #[serde(default)]
@@ -31,14 +31,14 @@ pub struct SessionState {
 }
 
 #[derive(Clone)]
-pub struct SessionStore {
+pub(crate) struct SessionStore {
     state: Arc<RwLock<SessionState>>,
     path: PathBuf,
     dirty: Arc<AtomicBool>,
 }
 
 impl SessionStore {
-    pub async fn new(data_dir: &Path) -> Self {
+    pub(crate) async fn new(data_dir: &Path) -> Self {
         let path = data_dir.join("session-state.json");
         let state = match tokio::fs::read_to_string(&path).await {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
@@ -49,7 +49,14 @@ impl SessionStore {
                 );
                 SessionState::default()
             }),
-            Err(_) => SessionState::default(),
+            Err(e) => {
+                kovi::log::warn!(
+                    "hermes: failed to read session state from {}: {}, starting fresh",
+                    path.display(),
+                    e
+                );
+                SessionState::default()
+            }
         };
         let store = Self {
             state: Arc::new(RwLock::new(state)),
@@ -71,7 +78,7 @@ impl SessionStore {
             );
             loop {
                 interval.tick().await;
-                if dirty.swap(false, Ordering::Relaxed) {
+                if dirty.load(Ordering::Relaxed) {
                     let raw = {
                         let s = state.read().await;
                         match serde_json::to_string_pretty(&*s) {
@@ -86,29 +93,40 @@ impl SessionStore {
                     };
                     if let Err(e) = tokio::fs::write(&path, &raw).await {
                         kovi::log::warn!("hermes: failed to write session state: {e}");
-                        dirty.store(true, Ordering::Relaxed);
+                    } else {
+                        dirty.compare_exchange(
+                            true,
+                            false,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        ).ok();
                     }
                 }
             }
         });
     }
 
-    pub async fn flush(&self) {
-        self.dirty.store(false, Ordering::Relaxed);
+    pub(crate) async fn flush(&self) {
         self.write_to_disk().await;
+        self.dirty.compare_exchange(
+            true,
+            false,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ).ok();
     }
 
     fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
-    pub async fn session_id(&self, base_key: &str) -> String {
+    pub(crate) async fn session_id(&self, base_key: &str) -> String {
         let state = self.state.read().await;
         let version = state.session_versions.get(base_key).copied().unwrap_or(0);
         format!("{base_key}:v{version}")
     }
 
-    pub async fn bump_session(&self, base_key: &str) -> String {
+    pub(crate) async fn bump_session(&self, base_key: &str) -> String {
         let new_id;
         {
             let mut state = self.state.write().await;
@@ -123,12 +141,12 @@ impl SessionStore {
         new_id
     }
 
-    pub async fn selected_model(&self) -> String {
+    pub(crate) async fn selected_model(&self) -> String {
         let state = self.state.read().await;
         state.selected_model.clone()
     }
 
-    pub async fn set_selected_model(&self, model: &str) {
+    pub(crate) async fn set_selected_model(&self, model: &str) {
         {
             let mut state = self.state.write().await;
             state.selected_model = model.to_string();
@@ -136,7 +154,7 @@ impl SessionStore {
         self.mark_dirty();
     }
 
-    pub async fn clear_selected_model(&self) {
+    pub(crate) async fn clear_selected_model(&self) {
         {
             let mut state = self.state.write().await;
             state.selected_model.clear();
@@ -144,7 +162,7 @@ impl SessionStore {
         self.mark_dirty();
     }
 
-    pub async fn get_conversation(&self, session_id: &str) -> Vec<ConversationMessage> {
+    pub(crate) async fn get_conversation(&self, session_id: &str) -> Vec<ConversationMessage> {
         let state = self.state.read().await;
         state
             .conversations
@@ -153,7 +171,7 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
-    pub async fn append_conversation(
+    pub(crate) async fn append_conversation(
         &self,
         session_id: &str,
         messages: &[ConversationMessage],
@@ -200,7 +218,6 @@ impl SessionStore {
         for key in &stale_keys {
             state.conversations.remove(key);
             state.last_active.remove(key);
-            state.session_versions.remove(key);
         }
 
         if state.conversations.len() > MAX_SESSIONS {
@@ -214,9 +231,18 @@ impl SessionStore {
             for (key, _) in entries.iter().take(to_remove) {
                 state.conversations.remove(key);
                 state.last_active.remove(key);
-                state.session_versions.remove(key);
             }
         }
+
+        let active_base_keys: std::collections::HashSet<String> = state
+            .last_active
+            .keys()
+            .filter_map(|sid| sid.rsplit_once(":v").map(|(base, _)| base.to_string()))
+            .collect();
+
+        state
+            .session_versions
+            .retain(|base_key, _| active_base_keys.contains(base_key));
     }
 
     async fn write_to_disk(&self) {

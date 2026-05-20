@@ -12,7 +12,7 @@ pub enum TriggerReason {
     Open,
 }
 
-pub enum TriggerResult {
+pub(crate) enum TriggerResult {
     Triggered(TriggerReason),
     NotTriggered,
 }
@@ -27,7 +27,7 @@ fn command_reason(mentioned: bool, is_reply_to_bot: bool, allow_bare: bool) -> T
     }
 }
 
-pub fn decide_group_trigger(
+pub(crate) fn decide_group_trigger(
     config: &HermesConfig,
     event: &MsgEvent,
     self_id: i64,
@@ -88,7 +88,7 @@ pub fn decide_group_trigger(
     TriggerResult::Triggered(TriggerReason::Open)
 }
 
-pub fn has_at_self(event: &MsgEvent, self_id: i64) -> bool {
+pub(crate) fn has_at_self(event: &MsgEvent, self_id: i64) -> bool {
     let msg = &event.message;
     for seg in msg.get("at") {
         if let Some(qq) = seg.data.get("qq").and_then(|v| v.as_str())
@@ -100,7 +100,7 @@ pub fn has_at_self(event: &MsgEvent, self_id: i64) -> bool {
     false
 }
 
-pub fn contains_keyword(text: &str, normalized_keywords: &[String]) -> bool {
+pub(crate) fn contains_keyword(text: &str, normalized_keywords: &[String]) -> bool {
     if normalized_keywords.is_empty() {
         return false;
     }
@@ -108,12 +108,12 @@ pub fn contains_keyword(text: &str, normalized_keywords: &[String]) -> bool {
     normalized_keywords.iter().any(|kw| normalized.contains(kw))
 }
 
-pub fn is_command(text: &str) -> bool {
+pub(crate) fn is_command(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.starts_with('/') && trimmed.len() > 1 && !trimmed.starts_with("//")
 }
 
-pub fn parse_command(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn parse_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
         return None;

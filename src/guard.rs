@@ -7,18 +7,18 @@ const COOLDOWN_SECS: i64 = 10;
 const MAX_ENTRIES: usize = 10000;
 const EVICT_THRESHOLD: usize = 8000;
 
-pub struct NotificationGuard {
+pub(crate) struct NotificationGuard {
     cooldowns: RwLock<HashMap<i64, i64>>,
 }
 
 impl NotificationGuard {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cooldowns: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn should_notify(&self, user_id: UserId) -> bool {
+    pub(crate) async fn should_notify(&self, user_id: UserId) -> bool {
         let now = now_timestamp();
 
         let map = self.cooldowns.read().await;

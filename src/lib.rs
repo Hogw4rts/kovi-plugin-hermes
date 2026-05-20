@@ -53,12 +53,14 @@ async fn main() {
     let data_path = Arc::new(data_path);
 
     let config = config::load_config(&data_path);
-    if config.api_base_url.is_empty() || config.api_key.is_empty() {
-        kovi::log::error!(
-            "hermes: api_base_url and api_key must be configured in hermes.json"
-        );
+
+    if let Err(errors) = config.validate() {
+        for e in &errors {
+            kovi::log::error!("hermes: config error: {e}");
+        }
         return;
     }
+
     info!("hermes: plugin loaded, model={}", config.model);
 
     let normalized_keywords = Arc::new(config::normalize_keywords(&config.keyword_triggers));
@@ -95,18 +97,21 @@ async fn main() {
     let notif_guard = Arc::new(NotificationGuard::new());
 
     if config.onebot_api_enabled && !config.onebot_api_key.is_empty() {
-        let ob_state = onebot_api::OnebotState {
-            bot: bot.clone(),
-            api_key: config.onebot_api_key.clone(),
-            admin_ids: bot.get_all_admin().unwrap_or_default(),
-        };
+        let ob_state = onebot_api::OnebotState::new(
+            bot.clone(),
+            config.onebot_api_key.clone(),
+            config.onebot_admin_key.clone(),
+            config.onebot_allowed_origins.clone(),
+        );
         let ob_port = config.onebot_api_port;
+        let ob_bind = config.onebot_api_bind.clone();
+        let ob_bind_log = ob_bind.clone();
         tokio::spawn(async move {
-            if let Err(e) = onebot_api::start(ob_state, ob_port).await {
+            if let Err(e) = onebot_api::start(ob_state, &ob_bind, ob_port).await {
                 kovi::log::error!("hermes: OneBot API server error: {e}");
             }
         });
-        info!("hermes: OneBot API enabled on port {ob_port}");
+        info!("hermes: OneBot API enabled on {ob_bind_log}:{ob_port}");
     }
 
     plugin::on_msg({
@@ -186,14 +191,14 @@ async fn handle_message(
         None => String::new(),
     };
 
-let mut image_urls = if config.image_recognition {
-        extract_image_urls(bot, &event.message, &llm.http(), config.image_mode).await
+    let mut image_urls = if config.image_recognition {
+        extract_image_urls(bot, &event.message, llm.http(), config.image_mode).await
     } else {
         Vec::new()
     };
 
     if image_urls.is_empty() && config.image_recognition && event.message.contains("reply") {
-        let reply_urls = extract_reply_image_urls(bot, &event.message, &llm.http(), config.image_mode).await;
+        let reply_urls = extract_reply_image_urls(bot, &event.message, llm.http(), config.image_mode).await;
         if !reply_urls.is_empty() {
             kovi::log::info!("hermes: extracted {} image(s) from replied message", reply_urls.len());
             image_urls = reply_urls;
@@ -271,7 +276,7 @@ let mut image_urls = if config.image_recognition {
 }
 
 struct ChatContext {
-    llm: LlmClient,
+    llm: Arc<LlmClient>,
     config: Arc<HermesConfig>,
     bot: kovi::RuntimeBot,
     route: MessageRoute,
@@ -295,7 +300,7 @@ async fn handle_chat(
 ) {
     let debounce_ms = config.queue_debounce_ms;
     let ctx = ChatContext {
-        llm: (**llm).clone(),
+        llm: Arc::clone(llm),
         config: Arc::clone(config),
         bot: bot.clone(),
         route: route.clone(),
@@ -325,7 +330,7 @@ async fn handle_normal_reply(ctx: &ChatContext) {
         Ok(reply) => {
             let cleaned = clean_outbound_text(&reply, ctx.config.format_markdown);
             let outbound = if cleaned.is_empty() {
-                "\u{8fd9}\u{8f6e}\u{6ca1}\u{6709}\u{8fd4}\u{56de}\u{53ef}\u{53d1}\u{9001}\u{7684}\u{6587}\u{672c}\u{3002}".to_string()
+                "这轮没有返回可发送的文本。".to_string()
             } else {
                 cleaned
             };
@@ -337,7 +342,7 @@ async fn handle_normal_reply(ctx: &ChatContext) {
                 &ctx.bot,
                 &ctx.route,
                 &ctx.config,
-                &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
+                "请求失败，请稍后重试。",
             )
             .await;
         }
@@ -354,7 +359,7 @@ async fn handle_stream_reply(ctx: &ChatContext) {
                 &ctx.bot,
                 &ctx.route,
                 &ctx.config,
-                &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
+                "请求失败，请稍后重试。",
             )
             .await;
             return;
@@ -393,7 +398,7 @@ async fn handle_stream_reply(ctx: &ChatContext) {
                         &ctx.bot,
                         &ctx.route,
                         &ctx.config,
-                        "\u{8fd9}\u{8f6e}\u{6ca1}\u{6709}\u{8fd4}\u{56de}\u{53ef}\u{53d1}\u{9001}\u{7684}\u{6587}\u{672c}\u{3002}",
+                        "这轮没有返回可发送的文本。",
                     )
                     .await;
                 }
@@ -413,7 +418,7 @@ async fn handle_stream_reply(ctx: &ChatContext) {
                         &ctx.bot,
                         &ctx.route,
                         &ctx.config,
-                        &format!("\u{8c03}\u{7528}\u{5931}\u{8d25}: {e}"),
+                        "请求失败，请稍后重试。",
                     )
                     .await;
                 }

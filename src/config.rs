@@ -5,7 +5,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(clippy::struct_excessive_bools)]
-pub struct HermesConfig {
+pub(crate) struct HermesConfig {
     pub api_base_url: String,
     #[serde(default)]
     pub api_key: SecretString,
@@ -62,11 +62,17 @@ pub struct HermesConfig {
     pub onebot_api_port: u16,
     #[serde(default)]
     pub onebot_api_key: SecretString,
+    #[serde(default = "default_onebot_api_bind")]
+    pub onebot_api_bind: String,
+    #[serde(default)]
+    pub onebot_admin_key: SecretString,
+    #[serde(default)]
+    pub onebot_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ImageMode {
+pub(crate) enum ImageMode {
     Url,
     Base64,
 }
@@ -78,36 +84,49 @@ fn default_image_mode() -> ImageMode {
 fn default_true() -> bool {
     true
 }
+
 fn default_blocked_message() -> String {
     "当前仅白名单或管理员可触发机器人。".to_string()
 }
+
 fn default_max_message_length() -> usize {
     1200
 }
+
 fn default_rate_limit_ms() -> u64 {
     800
 }
+
 fn default_request_timeout_ms() -> u64 {
     180_000
 }
+
 fn default_max_retries() -> u32 {
     1
 }
+
 fn default_retry_delay_ms() -> u64 {
     2000
 }
+
 fn default_local_history_max() -> usize {
     24
 }
+
 fn default_queue_debounce_ms() -> u64 {
     0
 }
+
 fn default_api_rate_limit_rpm() -> u64 {
     60
 }
 
 fn default_onebot_api_port() -> u16 {
     5801
+}
+
+fn default_onebot_api_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 impl Default for HermesConfig {
@@ -143,12 +162,15 @@ impl Default for HermesConfig {
             onebot_api_enabled: false,
             onebot_api_port: default_onebot_api_port(),
             onebot_api_key: SecretString::new(String::new()),
+            onebot_api_bind: default_onebot_api_bind(),
+            onebot_admin_key: SecretString::new(String::new()),
+            onebot_allowed_origins: Vec::new(),
         }
     }
 }
 
 impl HermesConfig {
-    pub fn build_system_prompt(&self) -> String {
+    pub(crate) fn build_system_prompt(&self) -> String {
         let base = format!(
             "You are {} speaking inside QQ via OneBot.\n\
              Keep replies concise, useful, and plain-text by default.\n\
@@ -166,9 +188,49 @@ impl HermesConfig {
             format!("{}\n{}", base, self.system_prompt)
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if self.api_base_url.is_empty() {
+            errors.push("api_base_url is required".to_string());
+        } else if !self.api_base_url.starts_with("https://") && !self.api_base_url.starts_with("http://") {
+            errors.push(format!("api_base_url must start with http:// or https://: {}", self.api_base_url));
+        }
+        if self.api_key.is_empty() {
+            errors.push("api_key is required".to_string());
+        }
+        if self.max_message_length == 0 {
+            errors.push("max_message_length must be > 0".to_string());
+        }
+        if self.request_timeout_ms == 0 {
+            errors.push("request_timeout_ms must be > 0".to_string());
+        }
+        if self.max_retries > 10 {
+            errors.push("max_retries should not exceed 10".to_string());
+        }
+        if self.onebot_api_enabled {
+            if self.onebot_api_key.is_empty() {
+                errors.push("onebot_api_key is required when onebot_api_enabled is true".to_string());
+            }
+            if self.onebot_admin_key.is_empty() {
+                errors.push("onebot_admin_key is required when onebot_api_enabled is true".to_string());
+            }
+            if self.onebot_api_port == 0 {
+                errors.push("onebot_api_port must be > 0".to_string());
+            }
+            if self.onebot_api_bind == "0.0.0.0" {
+                errors.push("onebot_api_bind should not be 0.0.0.0 (binds to all interfaces, use 127.0.0.1 or a specific IP)".to_string());
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
-pub fn load_config(data_dir: &Path) -> HermesConfig {
+pub(crate) fn load_config(data_dir: &Path) -> HermesConfig {
     let path = data_dir.join("hermes.json");
     match kovi::utils::load_json_data(HermesConfig::default(), &path) {
         Ok(c) => {
@@ -176,7 +238,7 @@ pub fn load_config(data_dir: &Path) -> HermesConfig {
             c
         }
         Err(e) => {
-            kovi::log::warn!(
+            kovi::log::error!(
                 "hermes: failed to load config from {}: {}, using defaults",
                 path.display(),
                 e
@@ -186,7 +248,7 @@ pub fn load_config(data_dir: &Path) -> HermesConfig {
     }
 }
 
-pub fn normalize_keywords(keywords: &[String]) -> Vec<String> {
+pub(crate) fn normalize_keywords(keywords: &[String]) -> Vec<String> {
     keywords
         .iter()
         .map(|kw| kw.to_lowercase().replace(' ', ""))

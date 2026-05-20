@@ -3,14 +3,15 @@ pub mod types;
 
 use crate::config::HermesConfig;
 use crate::ratelimit::RateLimiter;
+use crate::routing::Role;
 use crate::session::{ConversationMessage, SessionStore};
 use error::LlmError;
 use futures_util::StreamExt;
 use std::sync::Arc;
-use types::{ApiError, ChatChunkResponse, ChatMessage, ChatRequest, ChatResponse, MessageContent, ModelsResponse, Role};
+use types::{ApiError, ChatChunkResponse, ChatMessage, ChatRequest, ChatResponse, MessageContent, ModelsResponse};
 
 #[derive(Clone)]
-pub struct LlmClient {
+pub(crate) struct LlmClient {
     http: reqwest::Client,
     config: Arc<HermesConfig>,
     store: Arc<SessionStore>,
@@ -19,11 +20,11 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    pub fn http(&self) -> &reqwest::Client {
+    pub(crate) fn http(&self) -> &reqwest::Client {
         &self.http
     }
 
-    pub fn new(
+    pub(crate) fn new(
         config: Arc<HermesConfig>,
         store: Arc<SessionStore>,
         system_prompt: Arc<String>,
@@ -31,6 +32,7 @@ impl LlmClient {
     ) -> Result<Self, LlmError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| LlmError::ClientBuild(e.to_string()))?;
         Ok(Self {
@@ -122,7 +124,7 @@ impl LlmClient {
         }
     }
 
-    pub async fn complete(
+    pub(crate) async fn complete(
         &self,
         session_id: &str,
         user_message: &str,
@@ -158,6 +160,9 @@ impl LlmClient {
                     return Ok(reply);
                 }
                 Err(e) => {
+                    if !e.is_retryable() {
+                        return Err(e);
+                    }
                     last_error = Some(e);
                 }
             }
@@ -166,7 +171,7 @@ impl LlmClient {
         Err(last_error.unwrap_or(LlmError::EmptyResponse))
     }
 
-    pub async fn complete_stream(
+    pub(crate) async fn complete_stream(
         &self,
         session_id: &str,
         user_message: &str,
@@ -187,34 +192,68 @@ impl LlmClient {
             self.config.api_base_url.trim_end_matches('/')
         );
 
-        self.rate_limiter.acquire().await;
+        let mut last_error: Option<LlmError> = None;
 
-        let mut req = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key.as_str()))
-            .header("Content-Type", "application/json")
-            .json(&body);
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.config.retry_delay_ms))
+                    .await;
+            }
 
-        if !session_id.is_empty() {
-            req = req.header("X-Hermes-Session-Id", session_id);
+            self.rate_limiter.acquire().await;
+
+            let mut req = self
+                .http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.config.api_key.as_str()))
+                .header("Content-Type", "application/json")
+                .json(&body);
+
+            if !session_id.is_empty() {
+                req = req.header("X-Hermes-Session-Id", session_id);
+            }
+
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if !resp.status().is_success() {
+                        let payload: ApiError = resp.json().await.unwrap_or_else(|e| {
+                            kovi::log::warn!("hermes: failed to parse API error body: {e}");
+                            ApiError { error: None }
+                        });
+                        let message = payload
+                            .error
+                            .and_then(|e| e.message)
+                            .unwrap_or_else(|| format!("HTTP {status}"));
+                        let err = LlmError::Api { status, message };
+                        if !err.is_retryable() {
+                            return Err(err);
+                        }
+                        last_error = Some(err);
+                        continue;
+                    }
+
+                    return Ok(self.spawn_stream_processor(resp, session_id, user_message).await);
+                }
+                Err(e) => {
+                    let err = LlmError::Request(e);
+                    if !err.is_retryable() {
+                        return Err(err);
+                    }
+                    last_error = Some(err);
+                }
+            }
         }
 
-        let resp = req.send().await?;
-        let status = resp.status().as_u16();
+        Err(last_error.unwrap_or(LlmError::EmptyResponse))
+    }
 
-        if !resp.status().is_success() {
-            let payload: ApiError = resp.json().await.unwrap_or_else(|e| {
-                kovi::log::warn!("hermes: failed to parse API error body: {e}");
-                ApiError { error: None }
-            });
-            let message = payload
-                .error
-                .and_then(|e| e.message)
-                .unwrap_or_else(|| format!("HTTP {status}"));
-            return Err(LlmError::Api { status, message });
-        }
-
+    async fn spawn_stream_processor(
+        &self,
+        resp: reqwest::Response,
+        session_id: &str,
+        user_message: &str,
+    ) -> tokio::sync::mpsc::Receiver<StreamEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let user_msg = user_message.to_string();
@@ -222,7 +261,7 @@ impl LlmClient {
         let store = self.store.clone();
         let config = self.config.clone();
 
-kovi::spawn(async move {
+        kovi::spawn(async move {
             let mut full_reply = String::new();
             let mut stream = resp.bytes_stream();
 
@@ -241,12 +280,15 @@ kovi::spawn(async move {
                 while let Some(pos) = buf[consumed..].iter().position(|&b| b == b'\n') {
                     let line_start = consumed;
                     let line_end = consumed + pos;
-                    consumed = line_end + 1;
 
                     let line = match std::str::from_utf8(&buf[line_start..line_end]) {
                         Ok(s) => s.trim_end_matches('\r'),
-                        Err(_) => continue,
+                        Err(_) => {
+                            consumed = line_end + 1;
+                            continue;
+                        }
                     };
+                    consumed = line_end + 1;
 
                     match parse_sse_line(line) {
                         Some(SseFrame::Done) => {
@@ -281,7 +323,7 @@ kovi::spawn(async move {
                     }
                 }
 
-                if consumed > 8192 {
+                if consumed > 8192 || buf.len() > 65536 {
                     buf.drain(..consumed);
                     consumed = 0;
                 }
@@ -320,7 +362,7 @@ kovi::spawn(async move {
             }
         });
 
-        Ok(rx)
+        rx
     }
 
     async fn send_request(
@@ -371,7 +413,7 @@ kovi::spawn(async move {
         }
     }
 
-    pub async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+    pub(crate) async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.rate_limiter.acquire().await;
 
         let url = format!(
@@ -408,7 +450,7 @@ kovi::spawn(async move {
     }
 }
 
-pub enum StreamEvent {
+pub(crate) enum StreamEvent {
     Delta(String),
     Done,
     Error(String),

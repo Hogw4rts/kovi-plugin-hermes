@@ -3,7 +3,7 @@ use crate::routing::MsgType;
 use crate::routing::MessageRoute;
 use kovi::MsgEvent;
 
-pub async fn reply_text(
+pub(crate) async fn reply_text(
     bot: &kovi::RuntimeBot,
     route: &MessageRoute,
     config: &HermesConfig,
@@ -41,7 +41,7 @@ pub async fn reply_text(
     }
 }
 
-pub async fn is_reply_to_bot_message(
+pub(crate) async fn is_reply_to_bot_message(
     bot: &kovi::RuntimeBot,
     event: &MsgEvent,
     self_id: i64,

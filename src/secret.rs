@@ -4,25 +4,31 @@ use std::ops::Deref;
 use std::ptr;
 
 #[derive(Clone, Default)]
-pub struct SecretString {
+pub(crate) struct SecretString {
     inner: Vec<u8>,
 }
 
 impl SecretString {
-    pub fn new(s: String) -> Self {
-        Self {
-            inner: s.into_bytes(),
+    pub(crate) fn new(s: String) -> Self {
+        let mut bytes = s.into_bytes();
+        let inner = bytes.clone();
+        for byte in &mut bytes {
+            unsafe {
+                std::ptr::write_volatile(byte, 0);
+            }
         }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        Self { inner }
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         // SAFETY: inner is only ever constructed from valid UTF-8 — either
         // via String::into_bytes() in new() or via serde Deserialize from
         // a JSON string — so from_utf8_unchecked is sound.
         unsafe { std::str::from_utf8_unchecked(&self.inner) }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 }

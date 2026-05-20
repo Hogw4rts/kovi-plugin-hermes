@@ -1,9 +1,8 @@
+use crate::routing::Role;
 use serde::{Deserialize, Serialize};
 
-pub use crate::routing::Role;
-
 #[derive(Debug, Serialize)]
-pub struct ChatRequest {
+pub(crate) struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -11,7 +10,7 @@ pub struct ChatRequest {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct ChatMessage {
+pub(crate) struct ChatMessage {
     pub role: Role,
     pub content: MessageContent,
 }
@@ -19,7 +18,7 @@ pub struct ChatMessage {
 #[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 #[non_exhaustive]
-pub enum MessageContent {
+pub(crate) enum MessageContent {
     Text(String),
     Multimodal(Vec<ContentPart>),
 }
@@ -31,7 +30,7 @@ impl MessageContent {
         MessageContent::Text(s.into())
     }
 
-    pub fn from_text_and_images(text: &str, image_urls: &[&str]) -> Self {
+    pub(crate) fn from_text_and_images(text: &str, image_urls: &[&str]) -> Self {
         if image_urls.is_empty() {
             return MessageContent::Text(text.to_string());
         }
@@ -54,7 +53,7 @@ impl MessageContent {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum ContentPart {
+pub(crate) enum ContentPart {
     Text {
         text: String,
     },
@@ -74,59 +73,59 @@ pub enum ImageDetail {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[non_exhaustive]
-pub struct ImageUrl {
+pub(crate) struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<ImageDetail>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChatResponse {
+pub(crate) struct ChatResponse {
     pub choices: Option<Vec<Choice>>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Choice {
+pub(crate) struct Choice {
     pub message: Option<ChoiceMessage>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChoiceMessage {
+pub(crate) struct ChoiceMessage {
     pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChatChunkResponse {
+pub(crate) struct ChatChunkResponse {
     pub choices: Vec<ChunkChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChunkChoice {
+pub(crate) struct ChunkChoice {
     pub delta: Option<ChunkDelta>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChunkDelta {
+pub(crate) struct ChunkDelta {
     pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ModelsResponse {
+pub(crate) struct ModelsResponse {
     pub data: Option<Vec<ModelItem>>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ModelItem {
+pub(crate) struct ModelItem {
     pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ApiError {
+pub(crate) struct ApiError {
     pub error: Option<ApiErrorDetail>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ApiErrorDetail {
+pub(crate) struct ApiErrorDetail {
     pub message: Option<String>,
 }
 

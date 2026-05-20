@@ -56,13 +56,13 @@ impl TokenBucket {
 }
 
 #[derive(Clone)]
-pub struct RateLimiter {
+pub(crate) struct RateLimiter {
     inner: Arc<Mutex<LimiterKind>>,
 }
 
 impl RateLimiter {
     #[allow(clippy::cast_precision_loss)]
-    pub fn new(max_rpm: u64) -> Self {
+    pub(crate) fn new(max_rpm: u64) -> Self {
         let refill_per_sec = max_rpm as f64 / 60.0;
         Self {
             inner: Arc::new(Mutex::new(LimiterKind::Bucket(TokenBucket::new(
@@ -72,13 +72,13 @@ impl RateLimiter {
         }
     }
 
-    pub fn unlimited() -> Self {
+    pub(crate) fn unlimited() -> Self {
         Self {
             inner: Arc::new(Mutex::new(LimiterKind::Unlimited)),
         }
     }
 
-    pub async fn acquire(&self) {
+    pub(crate) async fn acquire(&self) {
         loop {
             let wait = {
                 let mut inner = self.inner.lock().await;
